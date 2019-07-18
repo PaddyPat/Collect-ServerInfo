@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
 Collect-ServerInfo.ps1 - PowerShell script to collect information about Windows servers
 
@@ -65,6 +65,7 @@ V1.01, 01/05/2015 - Updated with better error handling
 #>
 
 
+
 [CmdletBinding()]
 
 Param (
@@ -84,9 +85,42 @@ Begin
 Process
 {
 
+    #ReadHost Default Wert
+    function Read-HostDefault($Prompt, $Default) {
+        [void][System.Windows.Forms.SendKeys]
+        [System.Windows.Forms.SendKeys]::SendWait(
+            ([regex]'([\{\}\[\]\(\)\+\^\%\~])').Replace($Default, '{$1}'))
+	
+        Read-Host -Prompt $Prompt
+        trap {
+            [void][System.Reflection.Assembly]::LoadWithPartialName(
+                'System.Windows.Forms')
+            continue
+        }
+    }
+
+
     #---------------------------------------------------------------------
     # Process each ComputerName
     #---------------------------------------------------------------------
+
+
+    If (!$ComputerName){
+    Write-Host Hint: start script via """.\CollectComputerSystemInfo.ps1 $env:COMPUTERNAME""" -ForegroundColor Green
+    
+    <#
+    $defaultValue = $env:COMPUTERNAME
+    #$defaultValue = 'default'
+    $prompt = Read-Host "Press enter to accept the default comoputerame [$($defaultValue)]"
+    $prompt = ($defaultValue,$prompt)[[bool]$prompt]
+    
+    [string[]]$ComputerName = Read-Host "Computername eingeben"
+    #>
+
+    $ComputerName = Read-HostDefault "Computername eingeben" -Default $env:COMPUTERNAME
+
+    }
+
 
     if (!($PSCmdlet.MyInvocation.BoundParameters[“Verbose”].IsPresent))
     {
@@ -95,10 +129,36 @@ Process
 
     Write-Verbose "=====> Processing $ComputerName <====="
 
+
+            #Modell herausfinden bei Lenovo
+            $PCInfo = Get-WMIObject -Query "Select * from Win32_ComputerSystem" -Computername $ComputerName | Select-Object -Property Manufacturer, Model              
+            if ($PCInfo.Manufacturer -eq "LENOVO"){
+                $PCInfo = Get-WMIObject -Query "Select * from Win32_ComputerSystemProduct" -Computername $ComputerName | Select-Object -Property @{Name='Manufacturer';Expression={$_.Vendor}}, @{Name='Model';Expression={$_.Version}}
+            }else{
+                #  Get from the other location
+            }
+            
+            #Bios SN
+            $biosinfo = Get-WmiObject Win32_Bios -ComputerName $ComputerName -ErrorAction STOP |
+                Select-Object Status,Version,Manufacturer,
+                            @{Name='Release Date';Expression={
+                                $releasedate = [datetime]::ParseExact($_.ReleaseDate.SubString(0,8),"yyyyMMdd",$null);
+                                $releasedate.ToShortDateString()
+                            }},
+                            @{Name='Serial Number';Expression={$_.SerialNumber}}
+
+    Start-Sleep -s 1
+
+    $htmlfileBiosSN = $biosinfo.'Serial Number'    
+    $htmlfilePCModel = ($PCInfo.Model) -replace " ", "_"
+    $htmlfilePCManufacturer = ($PCInfo.Manufacturer) 
+    $htmlfileUserName = Get-WmiObject -Class win32_computersystem -ComputerName $ComputerName
     $htmlreport = @()
     $htmlbody = @()
-    $htmlfile = "$($ComputerName).html"
+    $DateTime = (Get-Date).ToString('yyyyMMdd-HHmmss')
+    $htmlfile = "$($DateTime)_$($ComputerName.ToUpper()).html"
     $spacer = "<br />"
+    $username = Get-WmiObject -Class win32_computersystem -ComputerName $ComputerName | select username
 
     #---------------------------------------------------------------------
     # Do 10 pings and calculate the fastest response time
@@ -148,10 +208,37 @@ Process
                                 "{0:F0}" -f $tpm
                             }},
                             DnsHostName,Domain
+
+
+            #Modell herausfinden bei Lenovo
+            $PCInfo = Get-WMIObject -Query "Select * from Win32_ComputerSystem" -Computername $ComputerName | Select-Object -Property Manufacturer, Model              
+            if ($PCInfo.Manufacturer -eq "LENOVO"){
+                $PCInfo = Get-WMIObject -Query "Select * from Win32_ComputerSystemProduct" -Computername $ComputerName | Select-Object -Property Vendor, Version
+            }else{
+                #  Get from the other location
+            }
        
+            
+            If ($PCInfo.Version -ne "") {
+            $csinfo | Add-Member -Name 'Version' -Type NoteProperty -Value $PCInfo.Version
+            $csinfo = $csinfo #| Select-Object  Manufacturer, Version, Model, "Physical Processors", "Logical Processors", "Total Physical Memory (Gb)", Name, DnsHostName, Domain
+            }
+            #If ($PCInfo.Model -ne "") {$csinfo | Add-Member -Name 'Model' -Type NoteProperty -Value $PCInfo.Model}
+         
+
+            $CPUInfo = Get-WmiObject Win32_Processor -ComputerName $ComputerName -ErrorAction STOP 
+            $CPUInfo = $CPUInfo | Select-Object Name
+
+            $csinfo | Add-Member -Name 'CPU' -Type NoteProperty -Value $CPUInfo.Name
+            $csinfo = $csinfo | Select-Object Manufacturer, Version, Model, CPU, "Physical Processors", "Logical Processors", "Total Physical Memory (Gb)" #, Name, DnsHostName, Domain
+
             $htmlbody += $csinfo | ConvertTo-Html -Fragment
             $htmlbody += $spacer
        
+
+
+
+
         }
         catch
         {
@@ -160,6 +247,66 @@ Process
             $htmlbody += $spacer
         }
 
+
+
+
+        #---------------------------------------------------------------------
+        # Collect user information and convert to HTML fragment
+        #---------------------------------------------------------------------
+    
+        Write-Verbose "Collecting account information"
+
+        $subhead = "<h3>Account Information</h3>"
+        $htmlbody += $subhead
+    
+        try
+        {
+            $getlocaluser = Get-LocalUser | Select-Object Name,SID,PrincipalSource,ObjectClass,Enabled,LastLogon,PasswordLastSet,PasswordRequired,Description | Sort-Object -Property @{Expression = {$_.Enabled}; Ascending = $false}, Name
+            
+            $getadmins = Get-LocalGroupMember -SID S-1-5-32-544 | Select-Object Name,ObjectClass,PrincipalSource,SID | Sort-Object PrincipalSource, Name
+
+            $htmlbody += "<p>Local User Information<p>"
+            $htmlbody += $spacer
+            $htmlbody += $getlocaluser | ConvertTo-Html -Fragment
+            $htmlbody += $spacer
+            $htmlbody += "<p>Admin Group Information<p>"
+            $htmlbody += $spacer
+            $htmlbody += $getadmins | ConvertTo-Html -Fragment
+            $htmlbody += $spacer
+        }
+        catch
+        {
+            Write-Warning $_.Exception.Message
+            $htmlbody += "<p>An error was encountered. $($_.Exception.Message)</p>"
+            $htmlbody += $spacer
+        }
+
+
+<#
+        #---------------------------------------------------------------------
+        # Collect CPU information and convert to HTML fragment
+        #---------------------------------------------------------------------
+    
+        Write-Verbose "Collecting CPU information"
+
+        $subhead = "<h3>CPU Information</h3>"
+        $htmlbody += $subhead
+    
+        try
+        {
+            $CPUInfo = Get-WmiObject Win32_Processor -ComputerName $ComputerName -ErrorAction STOP 
+            $CPUInfo = $CPUInfo | Select-Object Caption, Manufacturer, Name
+
+            $htmlbody += $CPUInfo | ConvertTo-Html -Fragment
+            $htmlbody += $spacer
+        }
+        catch
+        {
+            Write-Warning $_.Exception.Message
+            $htmlbody += "<p>An error was encountered. $($_.Exception.Message)</p>"
+            $htmlbody += $spacer
+        }
+#>
 
 
         #---------------------------------------------------------------------
@@ -182,7 +329,14 @@ Process
                                 $installdate.ToShortDateString()
                             }},
                             WindowsDirectory
+            
+            #$osinfo.GetType() 
+            #pscustomobject            
 
+            #Windows 
+            $OSBuild = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\" -Name ReleaseID).ReleaseId            
+            $osinfo | Add-Member -Name 'VersionBuild' -Type NoteProperty -Value $OSBuild
+            $osinfo = $osinfo | Select-Object "Operating System",VersionBuild,Architecture,Version, WindowsDirectory, "Install Date"
             $htmlbody += $osinfo | ConvertTo-Html -Fragment
             $htmlbody += $spacer
         }
@@ -293,15 +447,17 @@ Process
 
         $subhead = "<h3>Logical Disk Information</h3>"
         $htmlbody += $subhead
+        $htmlbody += "<p>DeviceID sorted</p>" 
 
         Write-Verbose "Collecting logical disk information"
 
         try
         {
-            $diskinfo = Get-WmiObject Win32_LogicalDisk -ComputerName $ComputerName -ErrorAction STOP | 
+            $diskinfo = Get-WmiObject Win32_LogicalDisk -ComputerName $ComputerName -ErrorAction STOP | ?{$_.ProviderName -notlike "\\*"} | 
                 Select-Object DeviceID,FileSystem,VolumeName,
                 @{Expression={$_.Size /1Gb -as [int]};Label="Total Size (GB)"},
-                @{Expression={$_.Freespace / 1Gb -as [int]};Label="Free Space (GB)"}
+                @{Expression={$_.Freespace / 1Gb -as [int]};Label="Free Space (GB)"} |
+                Sort-Object DeviceID
 
             $htmlbody += $diskinfo | ConvertTo-Html -Fragment
             $htmlbody += $spacer
@@ -314,6 +470,43 @@ Process
         }
 
 
+        #---------------------------------------------------------------------
+        # Collect logical disk information and convert to HTML fragment
+        #---------------------------------------------------------------------
+
+        $subhead = "<h3>SMB Share Information</h3>"
+        $htmlbody += $subhead
+        
+        Write-Verbose "Collecting smb share information"
+
+        try
+        {
+            $smbsharePS = Get-SmbConnection -ErrorAction SilentlyContinue | Select-Object ServerName, ShareName, UserName, Credential | Sort-Object ServerName, ShareName #-ComputerName $ComputerName -ErrorAction STOP
+            $smbshareWMI = Get-WmiObject -Class Win32_MappedLogicalDisk | select Name, ProviderName | sort-object Name
+
+            if ($smbsharePS) {
+                $htmlbody += "<p>SmbShare as Admin (PowerShell)</p>"
+                $htmlbody += $smbsharePS | ConvertTo-Html -Fragment
+            }Else{
+                $htmlbody += "<p>SmbShare as User (WMI)</p>"
+                $htmlbody += $smbshareWMI | ConvertTo-Html -Fragment
+            }
+
+            $htmlbody += $spacer
+        }
+        catch
+        {
+            #Write-Warning $_.Exception.Message
+            #$htmlbody += "<p>An error was encountered. $($_.Exception.Message)</p>"
+
+            $htmlbody += "<p>Get-SmbConnection - reqires admin permission</p>"
+            $htmlbody += $spacer
+            
+            $htmlbody += $spacer
+        }
+
+
+<#
         #---------------------------------------------------------------------
         # Collect volume information and convert to HTML fragment
         #---------------------------------------------------------------------
@@ -330,8 +523,11 @@ Process
                 @{Expression={$_.Capacity /1Gb -as [int]};Label="Total Size (GB)"},
                 @{Expression={$_.Freespace / 1Gb -as [int]};Label="Free Space (GB)"}
 
+            $volinfo = $volinfo | ?{($_.Name -notlike "\\?\Volume*") -and ($_.Label -notlike "PortableBaseLayer")} | Select-Object Name, Label, DeviceID, SystemVolume, "Total Size (GB)", "Free Space (GB)" | Sort-Object Name
+
             $htmlbody += $volinfo | ConvertTo-Html -Fragment
-            $htmlbody += $spacer
+            $htmlbody += $spacer        
+        
         }
         catch
         {
@@ -339,6 +535,49 @@ Process
             $htmlbody += "<p>An error was encountered. $($_.Exception.Message)</p>"
             $htmlbody += $spacer
         }
+#>
+
+        #---------------------------------------------------------------------
+        # Collect bitlocker information and convert to HTML fragment
+        #---------------------------------------------------------------------
+
+        $subhead = "<h3>Bitlocker Information</h3>"
+        $htmlbody += $subhead
+
+        Write-Verbose "Collecting bitlocker information"
+
+
+        #RegistryTest
+        If (($IsBdeDriverPresent = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\BitLocker\' -Name IsBdeDriverPresent -ErrorAction SilentlyContinue) -and $IsBdeDriverPresent.IsBdeDriverPresent -eq 1) {
+            #Write-Output 'Bitlocker is enabled'
+            $BDEStatus = @{"Bitlocker Status"="enabled"}
+        } Else {
+            $BDEStatus = @{"Bitlocker Status"="not enabled"}
+        }       
+            
+        $htmlbody += $BDEStatus.GetEnumerator() | Select-Object Name, Value | ConvertTo-Html -Fragment
+        $htmlbody += $spacer
+
+
+        try
+        {
+            
+            #Bitlocker
+            $volinfobitlocker = Get-BitLockerVolume -ErrorAction STOP
+                        
+            $volinfobitlocker = $volinfobitlocker | ?{$_.MountPoint -NotLike "\\?\Volume*"} | Select-Object MountPoint,VolumeType,CapacityGB,EncryptionMethod,AutoUnlockEnabled,AutoUnlockKeyStored,MetadataVersion,VolumeStatus,ProtectionStatus,LockStatus,EncryptionPercentage,WipePercentage | Sort-Object MountPoint
+            #$volinfobitlocker = $volinfobitlocker | Sort-Object Name, Label, DeviceID, SystemVolume, "Total Size (GB)", "Free Space (GB)"
+
+            $htmlbody += $volinfobitlocker | ConvertTo-Html -Fragment
+            $htmlbody += $spacer   
+        
+        }
+        catch
+        {
+            $htmlbody += "<p>Get-BitLockerVolume  - reqires admin permission</p>"
+            $htmlbody += $spacer
+        }
+          
 
 
         #---------------------------------------------------------------------
@@ -393,21 +632,23 @@ Process
         }
 
 
+
         #---------------------------------------------------------------------
-        # Collect software information and convert to HTML fragment
+        # Collect printer information and convert to HTML fragment
         #---------------------------------------------------------------------
 
-        $subhead = "<h3>Software Information</h3>"
+        $subhead = "<h3>Printer Information</h3>"
         $htmlbody += $subhead
- 
-        Write-Verbose "Collecting software information"
-        
+
+        Write-Verbose "Collecting printer information"
+
         try
         {
-            $software = Get-WmiObject Win32_Product -ComputerName $ComputerName -ErrorAction STOP | Select-Object Vendor,Name,Version | Sort-Object Vendor,Name
-        
-            $htmlbody += $software | ConvertTo-Html -Fragment
-            $htmlbody += $spacer 
+
+			$printer = Get-WmiObject -Query " SELECT * FROM Win32_Printer" | Select Name, Default, PortName | Sort-Object Name
+            $htmlbody += $printer | ConvertTo-Html -Fragment
+            $htmlbody += $spacer
+   
         
         }
         catch
@@ -416,23 +657,140 @@ Process
             $htmlbody += "<p>An error was encountered. $($_.Exception.Message)</p>"
             $htmlbody += $spacer
         }
+          
+
+
+        #---------------------------------------------------------------------
+        # Collect software information and convert to HTML fragment
+        #---------------------------------------------------------------------
+
+        $subhead = "<h3>Software Information</h3>"
+        $htmlbody += $subhead
+        $htmlbody += "<p>InstallDate sorted</p>" 
+
+        Write-Verbose "Collecting software information"
+        
+        try
+        {
+            #$software = Get-WmiObject Win32_Product -ComputerName $ComputerName -ErrorAction STOP | Select-Object Vendor,Name,Version | Sort-Object Vendor,Name
+
+
+            #Get-ItemProperty HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\* | select DisplayName, Publisher, InstallDate | Sort-Object InstallDate
+
+            try{
+                $InstalledSoftware = Get-ItemProperty HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*
+                $InstalledSoftware += Get-ItemProperty HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*
+            } catch {
+                Write-warning "Error while trying to retreive installed software from inventory: $($_.Exception.Message)"
+            }
+
+            #$InstalledSoftwareFiltered = $InstalledSoftware | select DisplayName, DisplayVersion, InstallLocation, InstallDate,  UninstallString, EstimatedSize, VersionMajor, VersionMinor, Publisher #| Sort-Object InstallDate -Descending
+            $InstalledSoftwareFiltered = $InstalledSoftware | select DisplayName, DisplayVersion, InstallLocation, InstallDate, Publisher #| Sort-Object InstallDate -Descending
+            $InstalledSoftwareFiltered = $InstalledSoftwareFiltered | Sort-Object -Property @{Expression = {$_.InstallDate}; Ascending = $false}, DisplayName
+            #$InstalledSoftwareFiltered = $InstalledSoftwareFiltered | Where-Object { [string]::IsNullOrWhiteSpace($_.DisplayName)}
+            $InstalledSoftwareFiltered = $InstalledSoftwareFiltered | Where-Object { $_.DisplayName }
+
+            $htmlbody += $InstalledSoftwareFiltered | ConvertTo-Html -Fragment
+            $htmlbody += $spacer 
+
        
+            #$htmlbody += $software | ConvertTo-Html -Fragment
+            #$htmlbody += $spacer 
+        
+        }
+        catch
+        {
+            Write-Warning $_.Exception.Message
+            $htmlbody += "<p>An error was encountered. $($_.Exception.Message)</p>"
+            $htmlbody += $spacer
+        }
+
+
+        #---------------------------------------------------------------------
+        # Collect software information and convert to HTML fragment
+        #---------------------------------------------------------------------
+
+        $subhead = "<h3>Software Information</h3>"
+        $htmlbody += $subhead
+        $htmlbody += "<p>DisplayName sorted</p>" 
+
+        Write-Verbose "Collecting software information (displayname sorted)"
+        
+        try
+        {
+
+            try{
+                $InstalledSoftware = Get-ItemProperty HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*
+                $InstalledSoftware += Get-ItemProperty HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*
+            } catch {
+                Write-warning "Error while trying to retreive installed software from inventory: $($_.Exception.Message)"
+            }
+
+            $InstalledSoftwareFiltered = $InstalledSoftware | select DisplayName, DisplayVersion, InstallLocation, InstallDate, Publisher #| Sort-Object InstallDate -Descending
+            $InstalledSoftwareFiltered = $InstalledSoftwareFiltered | Sort-Object DisplayName
+            $InstalledSoftwareFiltered = $InstalledSoftwareFiltered | Where-Object { $_.DisplayName }
+
+            $htmlbody += $InstalledSoftwareFiltered | ConvertTo-Html -Fragment
+            $htmlbody += $spacer 
+
+        
+        }
+        catch
+        {
+            Write-Warning $_.Exception.Message
+            $htmlbody += "<p>An error was encountered. $($_.Exception.Message)</p>"
+            $htmlbody += $spacer
+        }
+
+
+        #---------------------------------------------------------------------
+        # Collect Windows Update Information and convert to HTML fragment
+        #---------------------------------------------------------------------
+
+        $subhead = "<h3>Windows Update Information</h3>"
+        $htmlbody += $subhead
+        $htmlbody += "<p>InstalledOn sorted</p>" 
+ 
+        Write-Verbose "Collecting Windows Update information"
+        
+        try
+        {
+ 
+			try{
+                $InstalledHotfix = Get-Hotfix | Select-Object Description,HotFixID,InstalledBy, InstalledOn | Sort-Object InstalledOn -Descending
+            } catch {
+                Write-warning "Error while trying to retreive installed hotfix update software from inventory: $($_.Exception.Message)"
+            }
+            
+            $htmlbody += $InstalledHotfix | ConvertTo-Html -Fragment
+            $htmlbody += $spacer 
+
+        
+        }
+        catch
+        {
+            Write-Warning $_.Exception.Message
+            $htmlbody += "<p>An error was encountered. $($_.Exception.Message)</p>"
+            $htmlbody += $spacer
+        }
+        
+               
         #---------------------------------------------------------------------
         # Collect services information and covert to HTML fragment
-	# Added by Nicolas Nowinski (nicknow@nicknow.net): Mar 28 2019
+	    # Added by Nicolas Nowinski (nicknow@nicknow.net): Mar 28 2019
         #---------------------------------------------------------------------		
 		
         $subhead = "<h3>Computer Services Information</h3>"
         $htmlbody += $subhead
 		
-	Write-Verbose "Collecting services information"
+		Write-Verbose "Collecting services information"
 
-	try
-	{
-            $services = Get-WmiObject Win32_Service -ComputerName $ComputerName -ErrorAction STOP  | Select-Object Name,StartName,State,StartMode | Sort-Object Name
+		try
+		{
+			$services = Get-WmiObject Win32_Service -ComputerName $ComputerName -ErrorAction STOP  | Select-Object Name,StartName,State,StartMode | Sort-Object Name
 
-            $htmlbody += $services | ConvertTo-Html -Fragment
-            $htmlbody += $spacer 
+			$htmlbody += $services | ConvertTo-Html -Fragment
+			$htmlbody += $spacer 
         
         }
         catch
@@ -466,7 +824,7 @@ Process
 				    td.info{background: #85D4FF;}
 				    </style>
 				    <body>
-				    <h1 align=""center"">Server Info: $ComputerName</h1>
+				    <h1 align=""center"">SYSTEMINFORMATION: $($ComputerName.ToUpper())</h1>
 				    <h3 align=""center"">Generated: $reportime</h3>"
 
         $htmltail = "</body>
@@ -475,6 +833,9 @@ Process
         $htmlreport = $htmlhead + $htmlbody + $htmltail
 
         $htmlreport | Out-File $htmlfile -Encoding Utf8
+
+        #Datei öffnen
+        Invoke-Item $htmlfile
     }
 
 }
